@@ -591,7 +591,7 @@ static int time_now(lua_State *L){
 static luaL_Reg extra_funcs[] = {
   {"time_now", time_now},
   {NULL, NULL}
-}
+};
 
 LUALIB_API int luaopen_extra(lua_State *L) {
   luaL_newlib(L, extra_funcs);
