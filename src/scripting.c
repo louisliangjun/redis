@@ -38,6 +38,8 @@
 #include <ctype.h>
 #include <math.h>
 
+#include <sys/time.h>
+
 char *redisProtocolToLuaType_Int(lua_State *lua, char *reply);
 char *redisProtocolToLuaType_Bulk(lua_State *lua, char *reply);
 char *redisProtocolToLuaType_Status(lua_State *lua, char *reply);
@@ -252,9 +254,13 @@ int luaRedisGenericCommand(lua_State *lua, int raise_error) {
         if (lua_type(lua,j+1) == LUA_TNUMBER) {
             /* We can't use lua_tolstring() for number -> string conversion
              * since Lua uses a format specifier that loses precision. */
-            lua_Number num = lua_tonumber(lua,j+1);
-
-            obj_len = snprintf(dbuf,sizeof(dbuf),"%.17g",(double)num);
+            if (lua_isinteger(lua, j+1)) {
+                lua_Integer num = lua_tointeger(lua, j+1);
+                obj_len = snprintf(dbuf,sizeof(dbuf),"%"PRId64,(int64_t)num);
+            }else {
+                lua_Number num = lua_tonumber(lua,j+1);
+                obj_len = snprintf(dbuf,sizeof(dbuf),"%.17g",(double)num);
+            }
             obj_s = dbuf;
         } else {
             obj_s = (char*)lua_tolstring(lua,j+1,&obj_len);
@@ -514,11 +520,11 @@ int luaLogCommand(lua_State *lua) {
     if (argc < 2) {
         luaPushError(lua, "redis.log() requires two arguments or more.");
         return 1;
-    } else if (!lua_isnumber(lua,-argc)) {
-        luaPushError(lua, "First argument must be a number (log level).");
+    } else if (!lua_isinteger(lua,-argc)) {
+        luaPushError(lua, "First argument must be an integer (log level).");
         return 1;
     }
-    level = lua_tonumber(lua,-argc);
+    level = (int)lua_tointeger(lua,-argc);
     if (level < REDIS_DEBUG || level > REDIS_WARNING) {
         luaPushError(lua, "Invalid debug level.");
         return 1;
@@ -571,26 +577,50 @@ void luaLoadLib(lua_State *lua, const char *libname, lua_CFunction luafunc) {
   lua_call(lua, 1, 0);
 }
 
+static int time_now(lua_State *L){
+    struct timeval tv;
+    lua_Integer ret;
+    gettimeofday(&tv, 0);
+    ret = (lua_Integer)tv.tv_sec;
+    ret *= 1000;
+    ret += (lua_Integer)(tv.tv_usec/1000);
+    lua_pushinteger(L, ret);
+    return 1;
+}
+
+static luaL_Reg extra_funcs[] = {
+  {"time_now", time_now},
+  {NULL, NULL}
+}
+
+LUALIB_API int luaopen_extra(lua_State *L) {
+  luaL_newlib(L, extra_funcs);
+  return 1;
+}
+
 LUALIB_API int (luaopen_cjson) (lua_State *L);
-LUALIB_API int (luaopen_struct) (lua_State *L);
 LUALIB_API int (luaopen_cmsgpack) (lua_State *L);
-LUALIB_API int (luaopen_bit) (lua_State *L);
+
+static const luaL_Reg loadedlibs[] = {
+  {"_G", luaopen_base},
+  {LUA_TABLIBNAME, luaopen_table},
+  {LUA_STRLIBNAME, luaopen_string},
+  {LUA_MATHLIBNAME, luaopen_math},
+  {LUA_UTF8LIBNAME, luaopen_utf8},
+  {LUA_DBLIBNAME, luaopen_debug},
+  {"cmsgpack", luaopen_cmsgpack},
+  {"cjson", luaopen_cjson},
+  {"extra", luaopen_extra},
+  {NULL, NULL}
+};
 
 void luaLoadLibraries(lua_State *lua) {
-    luaLoadLib(lua, "", luaopen_base);
-    luaLoadLib(lua, LUA_TABLIBNAME, luaopen_table);
-    luaLoadLib(lua, LUA_STRLIBNAME, luaopen_string);
-    luaLoadLib(lua, LUA_MATHLIBNAME, luaopen_math);
-    luaLoadLib(lua, LUA_DBLIBNAME, luaopen_debug);
-    luaLoadLib(lua, "cjson", luaopen_cjson);
-    luaLoadLib(lua, "struct", luaopen_struct);
-    luaLoadLib(lua, "cmsgpack", luaopen_cmsgpack);
-    luaLoadLib(lua, "bit", luaopen_bit);
-
-#if 0 /* Stuff that we don't load currently, for sandboxing concerns. */
-    luaLoadLib(lua, LUA_LOADLIBNAME, luaopen_package);
-    luaLoadLib(lua, LUA_OSLIBNAME, luaopen_os);
-#endif
+    const luaL_Reg *lib;
+    /* "require" functions from 'loadedlibs' and set results to global table */
+    for (lib = loadedlibs; lib->func; lib++) {
+      luaL_requiref(lua, lib->name, lib->func, 1);
+      lua_pop(lua, 1);  /* remove lib */
+    }
 }
 
 /* Remove a functions that we don't want to expose to the Redis scripting
@@ -637,7 +667,10 @@ void scriptingEnableGlobalsProtection(lua_State *lua) {
 
     for (j = 0; s[j] != NULL; j++) code = sdscatlen(code,s[j],strlen(s[j]));
     luaL_loadbuffer(lua,code,sdslen(code),"@enable_strict_lua");
-    lua_pcall(lua,0,0,0);
+    if (lua_pcall(lua,0,0,0)) {
+        redisLog(REDIS_WARNING,"@enable_strict_lua failed: %s", lua_tostring(L,-1));
+        lua_pop(L, 1);
+    }
     sdsfree(code);
 }
 
@@ -646,7 +679,7 @@ void scriptingEnableGlobalsProtection(lua_State *lua) {
  * assuming that we call scriptingRelease() before.
  * See scriptingReset() for more information. */
 void scriptingInit(void) {
-    lua_State *lua = lua_open();
+    lua_State *lua = luaL_newstate();
 
     luaLoadLibraries(lua);
     luaRemoveUnsupportedFunctions(lua);
@@ -809,13 +842,20 @@ void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
 
     switch(t) {
     case LUA_TSTRING:
-        addReplyBulkCBuffer(c,(char*)lua_tostring(lua,-1),lua_strlen(lua,-1));
+        {
+            size_t len = 0;
+            const char* str = lua_tolstring(lua, -1, &len);
+            addReplyBulkCBuffer(c,(char*)str,len);
+        }
         break;
     case LUA_TBOOLEAN:
         addReply(c,lua_toboolean(lua,-1) ? shared.cone : shared.nullbulk);
         break;
     case LUA_TNUMBER:
-        addReplyLongLong(c,(long long)lua_tonumber(lua,-1));
+        if (lua_isinteger(lua, -1))
+            addReplyLongLong(c,(long long)lua_tointeger(lua,-1));
+        else
+            addReplyLongLong(c,(long long)lua_tonumber(lua,-1));
         break;
     case LUA_TTABLE:
         /* We need to check if it is an array, an error, or a status reply.
@@ -1129,14 +1169,14 @@ int redis_math_random (lua_State *L) {
       break;
     }
     case 1: {  /* only upper limit */
-      int u = luaL_checkint(L, 1);
+      lua_Integer u = luaL_checkinteger(L, 1);
       luaL_argcheck(L, 1<=u, 1, "interval is empty");
       lua_pushnumber(L, floor(r*u)+1);  /* int between 1 and `u' */
       break;
     }
     case 2: {  /* lower and upper limits */
-      int l = luaL_checkint(L, 1);
-      int u = luaL_checkint(L, 2);
+      lua_Integer l = luaL_checkinteger(L, 1);
+      lua_Integer u = luaL_checkinteger(L, 2);
       luaL_argcheck(L, l<=u, 2, "interval is empty");
       lua_pushnumber(L, floor(r*(u-l+1))+l);  /* int between `l' and `u' */
       break;
@@ -1147,7 +1187,7 @@ int redis_math_random (lua_State *L) {
 }
 
 int redis_math_randomseed (lua_State *L) {
-  redisSrand48(luaL_checkint(L, 1));
+  redisSrand48(luaL_checkinteger(L, 1));
   return 0;
 }
 
