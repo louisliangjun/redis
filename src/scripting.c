@@ -668,8 +668,8 @@ void scriptingEnableGlobalsProtection(lua_State *lua) {
     for (j = 0; s[j] != NULL; j++) code = sdscatlen(code,s[j],strlen(s[j]));
     luaL_loadbuffer(lua,code,sdslen(code),"@enable_strict_lua");
     if (lua_pcall(lua,0,0,0)) {
-        redisLog(REDIS_WARNING,"@enable_strict_lua failed: %s", lua_tostring(L,-1));
-        lua_pop(L, 1);
+        redisLog(REDIS_WARNING,"@enable_strict_lua failed: %s", lua_tostring(lua,-1));
+        lua_pop(lua, 1);
     }
     sdsfree(code);
 }
