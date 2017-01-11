@@ -38,7 +38,9 @@
 #include <ctype.h>
 #include <math.h>
 
+#ifndef _WIN32
 #include <sys/time.h>
+#endif
 
 char *redisProtocolToLuaType_Int(lua_State *lua, char *reply);
 char *redisProtocolToLuaType_Bulk(lua_State *lua, char *reply);
@@ -96,7 +98,7 @@ char *redisProtocolToLuaType_Int(lua_State *lua, char *reply) {
     long long value;
 
     string2ll(reply+1,p-reply-1,&value);
-    lua_pushnumber(lua,(lua_Number)value);
+    lua_pushinteger(lua, (lua_Integer)value);
     return p+2;
 }
 
@@ -137,7 +139,7 @@ char *redisProtocolToLuaType_Error(lua_State *lua, char *reply) {
 char *redisProtocolToLuaType_MultiBulk(lua_State *lua, char *reply) {
     char *p = strchr(reply+1,'\r');
     long long mbulklen;
-    int j = 0;
+    lua_Integer j = 0;
 
     string2ll(reply+1,p-reply-1,&mbulklen);
     p += 2;
@@ -147,7 +149,7 @@ char *redisProtocolToLuaType_MultiBulk(lua_State *lua, char *reply) {
     }
     lua_newtable(lua);
     for (j = 0; j < mbulklen; j++) {
-        lua_pushnumber(lua,j+1);
+        lua_pushinteger(lua,j+1);
         p = redisProtocolToLuaType(lua,p);
         lua_settable(lua,-3);
     }
@@ -577,7 +579,7 @@ void luaLoadLib(lua_State *lua, const char *libname, lua_CFunction luafunc) {
   lua_call(lua, 1, 0);
 }
 
-static int time_now(lua_State *L){
+static int luaRedisExtraTimeNow(lua_State *L){
     struct timeval tv;
     lua_Integer ret;
     gettimeofday(&tv, 0);
@@ -586,16 +588,6 @@ static int time_now(lua_State *L){
     ret += (lua_Integer)(tv.tv_usec/1000);
     lua_pushinteger(L, ret);
     return 1;
-}
-
-static luaL_Reg extra_funcs[] = {
-  {"time_now", time_now},
-  {NULL, NULL}
-};
-
-LUALIB_API int luaopen_extra(lua_State *L) {
-  luaL_newlib(L, extra_funcs);
-  return 1;
 }
 
 LUALIB_API int (luaopen_cjson) (lua_State *L);
@@ -610,7 +602,6 @@ static const luaL_Reg loadedlibs[] = {
   {LUA_DBLIBNAME, luaopen_debug},
   {"cmsgpack", luaopen_cmsgpack},
   {"cjson", luaopen_cjson},
-  {"extra", luaopen_extra},
   {NULL, NULL}
 };
 
@@ -708,19 +699,19 @@ void scriptingInit(void) {
     lua_settable(lua,-3);
 
     lua_pushstring(lua,"LOG_DEBUG");
-    lua_pushnumber(lua,REDIS_DEBUG);
+    lua_pushinteger(lua,REDIS_DEBUG);
     lua_settable(lua,-3);
 
     lua_pushstring(lua,"LOG_VERBOSE");
-    lua_pushnumber(lua,REDIS_VERBOSE);
+    lua_pushinteger(lua,REDIS_VERBOSE);
     lua_settable(lua,-3);
 
     lua_pushstring(lua,"LOG_NOTICE");
-    lua_pushnumber(lua,REDIS_NOTICE);
+    lua_pushinteger(lua,REDIS_NOTICE);
     lua_settable(lua,-3);
 
     lua_pushstring(lua,"LOG_WARNING");
-    lua_pushnumber(lua,REDIS_WARNING);
+    lua_pushinteger(lua,REDIS_WARNING);
     lua_settable(lua,-3);
 
     /* redis.sha1hex */
@@ -735,6 +726,11 @@ void scriptingInit(void) {
     lua_pushstring(lua, "status_reply");
     lua_pushcfunction(lua, luaRedisStatusReplyCommand);
     lua_settable(lua, -3);
+
+	/* extra methods */
+    lua_pushstring(lua,"extra_time_now");
+    lua_pushcfunction(lua, luaRedisExtraTimeNow);
+    lua_settable(lua,-3);
 
     /* Finally set the table as 'redis' global var. */
     lua_setglobal(lua,"redis");
@@ -885,11 +881,11 @@ void luaReplyToRedisReply(redisClient *c, lua_State *lua) {
             lua_pop(lua,1);
         } else {
             void *replylen = addDeferredMultiBulkLength(c);
-            int j = 1, mbulklen = 0;
+            lua_Integer j = 1, mbulklen = 0;
 
             lua_pop(lua,1); /* Discard the 'ok' field value we popped */
             while(1) {
-                lua_pushnumber(lua,j++);
+                lua_pushinteger(lua,j++);
                 lua_gettable(lua,-2);
                 t = lua_type(lua,-1);
                 if (t == LUA_TNIL) {
@@ -1171,14 +1167,14 @@ int redis_math_random (lua_State *L) {
     case 1: {  /* only upper limit */
       lua_Integer u = luaL_checkinteger(L, 1);
       luaL_argcheck(L, 1<=u, 1, "interval is empty");
-      lua_pushnumber(L, floor(r*u)+1);  /* int between 1 and `u' */
+      lua_pushinteger(L, (lua_Integer)floor(r*u)+1);  /* int between 1 and `u' */
       break;
     }
     case 2: {  /* lower and upper limits */
       lua_Integer l = luaL_checkinteger(L, 1);
       lua_Integer u = luaL_checkinteger(L, 2);
       luaL_argcheck(L, l<=u, 2, "interval is empty");
-      lua_pushnumber(L, floor(r*(u-l+1))+l);  /* int between `l' and `u' */
+      lua_pushinteger(L, (lua_Integer)floor(r*(u-l+1))+l);  /* int between `l' and `u' */
       break;
     }
     default: return luaL_error(L, "wrong number of arguments");
