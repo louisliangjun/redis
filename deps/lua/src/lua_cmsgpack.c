@@ -578,7 +578,7 @@ void mp_decode_to_lua_type(lua_State *L, mp_cur *c) {
      * determine how many objects a msgpack will unpack to up front, so
      * we request a +1 larger stack on each iteration (noop if stack is
      * big enough, and when stack does require resize it doubles in size) */
-    luaL_checkstack(L, 1,
+    luaL_checkstack(L, 8,		// NOTICE : BUG, at less use 4, not 1, for save, use 8
         "too many return values at once; "
         "use unpack_one or unpack_limit instead.");
 
@@ -801,7 +801,7 @@ int mp_unpack_full(lua_State *L, int limit, int offset) {
         return luaL_error(L,
             "Start offset %d greater than input length %d.", offset, len);
 
-    if (decode_all) limit = INT_MAX;
+    if (decode_all) limit = 32;	// INT_MAX; // NOTICE : limit 32 for safe unpack!!!
 
     mp_cur_init(&c,(const unsigned char *)s+offset,len-offset);
 
